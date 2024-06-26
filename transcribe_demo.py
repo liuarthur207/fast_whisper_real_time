@@ -4,8 +4,7 @@ import argparse
 import os
 import numpy as np
 import speech_recognition as sr
-import whisper
-import torch
+from faster_whisper import WhisperModel
 
 from datetime import datetime, timedelta
 from queue import Queue
@@ -13,9 +12,10 @@ from time import sleep
 from sys import platform
 
 
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="medium", help="Model to use",
+    parser.add_argument("--model", default="small", help="Model to use",
                         choices=["tiny", "base", "small", "medium", "large"])
     parser.add_argument("--non_english", action='store_true',
                         help="Don't use the english model.")
@@ -54,7 +54,8 @@ def main():
         else:
             for index, name in enumerate(sr.Microphone.list_microphone_names()):
                 if mic_name in name:
-                    source = sr.Microphone(sample_rate=16000, device_index=index)
+                    source = sr.Microphone(
+                        sample_rate=16000, device_index=index)
                     break
     else:
         source = sr.Microphone(sample_rate=16000)
@@ -63,8 +64,8 @@ def main():
     model = args.model
     if args.model != "large" and not args.non_english:
         model = model + ".en"
-    audio_model = whisper.load_model(model)
-
+    "audio_model = whisper.load_model(model)"
+    audio_model = WhisperModel("small.en", device="cpu", compute_type="int8")
     record_timeout = args.record_timeout
     phrase_timeout = args.phrase_timeout
 
@@ -73,7 +74,7 @@ def main():
     with source:
         recorder.adjust_for_ambient_noise(source)
 
-    def record_callback(_, audio:sr.AudioData) -> None:
+    def record_callback(_, audio: sr.AudioData) -> None:
         """
         Threaded callback function to receive audio data when recordings finish.
         audio: An AudioData containing the recorded bytes.
@@ -84,7 +85,8 @@ def main():
 
     # Create a background thread that will pass us raw audio bytes.
     # We could do this manually but SpeechRecognizer provides a nice helper.
-    recorder.listen_in_background(source, record_callback, phrase_time_limit=record_timeout)
+    recorder.listen_in_background(
+        source, record_callback, phrase_time_limit=record_timeout)
 
     # Cue the user that we're ready to go.
     print("Model loaded.\n")
@@ -101,19 +103,36 @@ def main():
                     phrase_complete = True
                 # This is the last time we received new audio data from the queue.
                 phrase_time = now
-                
+
                 # Combine audio data from queue
                 audio_data = b''.join(data_queue.queue)
                 data_queue.queue.clear()
-                
+
                 # Convert in-ram buffer to something the model can use directly without needing a temp file.
                 # Convert data from 16 bit wide integers to floating point with a width of 32 bits.
                 # Clamp the audio stream frequency to a PCM wavelength compatible default of 32768hz max.
-                audio_np = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                audio_np = np.frombuffer(
+                    audio_data, dtype=np.int16).astype(np.float32) / 32768.0
 
                 # Read the transcription.
-                result = audio_model.transcribe(audio_np, fp16=torch.cuda.is_available())
-                text = result['text'].strip()
+                result = audio_model.transcribe(
+                    audio_np, beam_size=5, language="en")
+
+                # Access the generator from the tuple
+                segments_generator = result[0]
+
+                # Initialize a list to hold the segments of text
+                transcription_segments = []
+                
+                for segment in segments_generator:
+                    # Print the segment to understand its structure (for debugging)
+                    print(segment)
+
+                    # Access the text attribute of each segment and add it to the list
+                    transcription_segments.append(segment.text)  # Use the `text` attribute
+
+
+                text = ' '.join(transcription_segments).strip()
 
                 # If we detected a pause between recordings, add a new item to our transcription.
                 # Otherwise edit the existing one.
@@ -123,7 +142,7 @@ def main():
                     transcription[-1] = text
 
                 # Clear the console to reprint the updated transcription.
-                os.system('cls' if os.name=='nt' else 'clear')
+                os.system('cls' if os.name == 'nt' else 'clear')
                 for line in transcription:
                     print(line)
                 # Flush stdout.
